@@ -1,6 +1,9 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
   description: >
+    **Version 1.1.0** - Improved rotation responsiveness
+
+
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
 
 
