@@ -1,0 +1,169 @@
+blueprint:
+  name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
+  description: >
+    Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
+
+
+    **The knob must be in EVENT mode** (triple-click to switch modes).
+
+
+    - **Single press**: Run a configurable action (e.g., home cinema ON script)
+
+    - **Double press**: Run a configurable action (e.g., home cinema OFF script)
+
+    - **Rotate right**: Volume up
+
+    - **Rotate left**: Volume down
+
+    - **Hold (3s)**: Mute toggle
+
+
+    Volume control uses `media_player.volume_set` with a configurable step size
+    for precise control. The media player must be on and available for volume
+    and mute operations to take effect.
+  domain: automation
+  author: "Jan Singer"
+  homeassistant:
+    min_version: "2024.6.0"
+  input:
+    mqtt_settings:
+      name: "MQTT Configuration"
+      icon: mdi:antenna
+      collapsed: false
+      description: "Zigbee2MQTT connection settings for the MOES Smart Knob."
+      input:
+        base_topic:
+          name: "Zigbee2MQTT Base Topic"
+          description: >
+            The base MQTT topic configured in your Zigbee2MQTT settings.
+            Default is `zigbee2mqtt` unless you changed it.
+          default: "zigbee2mqtt"
+          selector:
+            text: {}
+        mqtt_device_name:
+          name: "MQTT Device Friendly Name"
+          description: >
+            The friendly name of your MOES Smart Knob as configured in
+            Zigbee2MQTT (e.g., `moes_knob_living_room`). This is used to
+            construct the MQTT topic: `<base_topic>/<friendly_name>/action`.
+          selector:
+            text: {}
+    media_player_settings:
+      name: "Media Player"
+      icon: mdi:speaker
+      collapsed: false
+      description: "Media player entity and volume settings."
+      input:
+        media_player:
+          name: "Media Player Entity"
+          description: >
+            The media player to control with the knob rotation.
+            Volume and mute commands are sent to this entity.
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+        volume_step:
+          name: "Volume Step (%)"
+          description: >
+            Volume percentage change per rotation tick. Lower values give
+            finer control. 2% is recommended for AV receivers.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 10
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+    button_actions:
+      name: "Button Actions"
+      icon: mdi:gesture-tap
+      collapsed: false
+      description: "Actions to run on single press, double press, and hold."
+      input:
+        single_press_action:
+          name: "Single Press Action"
+          description: >
+            Action to run on a single press (e.g., run a home cinema ON script).
+          default: []
+          selector:
+            action: {}
+        double_press_action:
+          name: "Double Press Action"
+          description: >
+            Action to run on a double press (e.g., run a home cinema OFF script).
+          default: []
+          selector:
+            action: {}
+
+mode: restart
+max_exceeded: silent
+
+trigger_variables:
+  base_topic: !input base_topic
+  mqtt_device_name: !input mqtt_device_name
+
+trigger:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
+
+action:
+  - variables:
+      payload: "{{ trigger.payload }}"
+      media_player_id: !input media_player
+      volume_step: !input volume_step
+      is_player_on: >-
+        {{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}
+  - choose:
+      # --- Single Press: Home Cinema ON ---
+      - conditions:
+          - "{{ payload == 'single' }}"
+        sequence: !input single_press_action
+
+      # --- Double Press: Home Cinema OFF ---
+      - conditions:
+          - "{{ payload == 'double' }}"
+        sequence: !input double_press_action
+
+      # --- Rotate Right: Volume Up ---
+      - conditions:
+          - "{{ payload == 'rotate_right' }}"
+          - "{{ is_player_on }}"
+        sequence:
+          - action: media_player.volume_set
+            target:
+              entity_id: !input media_player
+            data:
+              volume_level: >-
+                {% set current = state_attr(media_player_id, 'volume_level') | float(0) %}
+                {% set step = volume_step / 100 %}
+                {% set new_vol = current + step %}
+                {{ [[new_vol, 0.0] | max, 1.0] | min }}
+
+      # --- Rotate Left: Volume Down ---
+      - conditions:
+          - "{{ payload == 'rotate_left' }}"
+          - "{{ is_player_on }}"
+        sequence:
+          - action: media_player.volume_set
+            target:
+              entity_id: !input media_player
+            data:
+              volume_level: >-
+                {% set current = state_attr(media_player_id, 'volume_level') | float(0) %}
+                {% set step = volume_step / 100 %}
+                {% set new_vol = current - step %}
+                {{ [[new_vol, 0.0] | max, 1.0] | min }}
+
+      # --- Hold: Mute Toggle ---
+      - conditions:
+          - "{{ payload == 'hold' }}"
+          - "{{ is_player_on }}"
+        sequence:
+          - action: media_player.volume_mute
+            target:
+              entity_id: !input media_player
+            data:
+              is_volume_muted: >-
+                {{ not state_attr(media_player_id, 'is_volume_muted') }}
