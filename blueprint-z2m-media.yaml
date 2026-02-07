@@ -97,7 +97,7 @@ blueprint:
           selector:
             action: {}
 
-mode: restart
+mode: single
 max_exceeded: silent
 
 trigger_variables:
@@ -126,35 +126,57 @@ action:
           - "{{ payload == 'double' }}"
         sequence: !input double_press_action
 
-      # --- Rotate Right: Volume Up ---
+      # --- Rotation: Volume Up/Down ---
       - conditions:
-          - "{{ payload == 'rotate_right' }}"
+          - "{{ payload in ['rotate_right', 'rotate_left'] }}"
           - "{{ is_player_on }}"
         sequence:
+          - variables:
+              direction: "{{ 1 if payload == 'rotate_right' else -1 }}"
+              initial_volume: "{{ state_attr(media_player_id, 'volume_level') | float(0) }}"
+              accumulated_steps: 1
+              rotation_payload: "{{ payload }}"
+              mqtt_topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
+
+          # Apply first step immediately for responsiveness
           - action: media_player.volume_set
             target:
               entity_id: !input media_player
             data:
               volume_level: >-
-                {% set current = state_attr(media_player_id, 'volume_level') | float(0) %}
-                {% set step = volume_step / 100 %}
-                {% set new_vol = current + step %}
+                {% set step = (volume_step * direction) / 100 %}
+                {% set new_vol = initial_volume + step %}
                 {{ [[new_vol, 0.0] | max, 1.0] | min }}
 
-      # --- Rotate Left: Volume Down ---
-      - conditions:
-          - "{{ payload == 'rotate_left' }}"
-          - "{{ is_player_on }}"
-        sequence:
-          - action: media_player.volume_set
-            target:
-              entity_id: !input media_player
-            data:
-              volume_level: >-
-                {% set current = state_attr(media_player_id, 'volume_level') | float(0) %}
-                {% set step = volume_step / 100 %}
-                {% set new_vol = current - step %}
-                {{ [[new_vol, 0.0] | max, 1.0] | min }}
+          # Accumulate additional rapid rotations
+          - repeat:
+              sequence:
+                - wait_for_trigger:
+                    - trigger: mqtt
+                      topic: "{{ mqtt_topic }}"
+                  timeout:
+                    milliseconds: 150
+                  continue_on_timeout: true
+                - if:
+                    - "{{ wait.trigger is not none and wait.trigger.payload == rotation_payload }}"
+                  then:
+                    - variables:
+                        accumulated_steps: "{{ accumulated_steps + 1 }}"
+              until:
+                - "{{ wait.trigger is none or (wait.trigger is not none and wait.trigger.payload != rotation_payload) }}"
+
+          # Apply remaining accumulated steps
+          - if:
+              - "{{ accumulated_steps > 1 }}"
+            then:
+              - action: media_player.volume_set
+                target:
+                  entity_id: !input media_player
+                data:
+                  volume_level: >-
+                    {% set total_step = (accumulated_steps * volume_step * direction) / 100 %}
+                    {% set new_vol = initial_volume + total_step %}
+                    {{ [[new_vol, 0.0] | max, 1.0] | min }}
 
       # --- Hold: Mute Toggle ---
       - conditions:
