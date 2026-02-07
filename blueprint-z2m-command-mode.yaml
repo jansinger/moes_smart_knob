@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
   description: >
-    **Version 1.0.0** - All-in-one COMMAND mode controller
+    **Version 1.1.0** - All-in-one COMMAND mode controller
 
 
     Controls media player volume with intensity-aware rotation and toggles
@@ -16,12 +16,25 @@ blueprint:
 
     - Hold syncs volume display
 
+    - Queued mode ensures NO rotation events are dropped
+
 
     **No helpers required** - simpler than EVENT mode blueprints.
 
 
     **The knob must be in COMMAND mode** (triple-click to switch modes).
     Verify in Z2M: Device → Exposes → operation_mode = "command"
+
+
+    **Z2M Device Settings (recommended):**
+
+    In Zigbee2MQTT → Device → Settings (gear icon):
+
+    - `debounce`: leave at default (no debounce needed)
+
+    - `filtered_cache`: leave disabled
+
+    - Ensure device has good signal strength (LQI > 50)
   domain: automation
   author: "Jan Singer"
   homeassistant:
@@ -128,8 +141,11 @@ blueprint:
               unit_of_measurement: "%"
               mode: slider
 
-# Restart mode: rapid rotations apply the latest value
-mode: restart
+# Queued mode: ensures NO rotation events are dropped
+# Each rotation is processed in order with its own action_step_size
+mode: queued
+max: 50
+max_exceeded: silent
 
 trigger_variables:
   base_topic: !input base_topic
@@ -146,15 +162,20 @@ condition:
 action:
   - variables:
       payload: "{{ trigger.payload_json.action }}"
-      step_size: "{{ trigger.payload_json.action_step_size | default(13) | int }}"
+      # action_step_size: 0-255, but sometimes reports 0 - use minimum of 13
+      raw_step: "{{ trigger.payload_json.action_step_size | default(13) | int }}"
+      step_size: "{{ [raw_step, 13] | max }}"
       media_player_id: !input media_player
       jvc_sensor_id: !input jvc_power_sensor
       volume_multiplier: !input volume_multiplier
       max_volume_step: !input max_volume_step
       # Calculate step as percentage (0-1 scale)
-      # step_size is 0-255, normalize to 0-1, then apply multiplier and max
+      # step_size is 13-255, normalize and apply multiplier
+      # Formula: (step/255) * (max_step/100) * multiplier
+      # With defaults (step=13, max=10%, mult=2): 0.01 = 1% per tick
       step_percent: >-
         {{ (step_size / 255) * (max_volume_step / 100) * volume_multiplier }}
+      # Read current volume at execution time (important for queued mode)
       current_vol: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
       new_vol_up: "{{ [[current_vol + step_percent, 0.0] | max, 1.0] | min }}"
       new_vol_down: "{{ [[current_vol - step_percent, 0.0] | max, 1.0] | min }}"
