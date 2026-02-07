@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Accumulator"
   description: >
-    **Version 4.0.1** - Part 1 of 2: Fast event accumulator
+    **Version 4.1.0** - Part 1 of 2: Fast event accumulator (fixed MQTT topic)
 
 
     This blueprint handles all MOES Smart Knob events with `mode: queued`,
@@ -120,11 +120,15 @@ trigger_variables:
 
 trigger:
   - trigger: mqtt
-    topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
+
+# Only process when action field is not empty
+condition:
+  - "{{ trigger.payload_json.action | default('') != '' }}"
 
 action:
   - variables:
-      payload: "{{ trigger.payload }}"
+      payload: "{{ trigger.payload_json.action }}"
       media_player_id: !input media_player
       volume_helper_id: !input volume_helper
 
