@@ -1,29 +1,31 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
   description: >
-    **Version 1.2.0** - Fixed rotation responsiveness with queued commands
+    **Version 2.0.0** - Optimized for Arcam AV40 (200ms command throttle)
 
 
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
 
 
+    **Requires an input_number helper** to track target volume. Create one at
+    Settings → Helpers → Number (min: 0, max: 1, step: 0.01).
+
+
     **The knob must be in EVENT mode** (triple-click to switch modes).
 
 
-    - **Single press**: Run a configurable action (e.g., home cinema ON script)
+    - **Rotate right/left**: Volume up/down (all rotations counted, debounced)
 
-    - **Double press**: Run a configurable action (e.g., home cinema OFF script)
+    - **Single press**: Run configurable action (e.g., home cinema ON)
 
-    - **Rotate right**: Volume up (one step per tick)
+    - **Double press**: Run configurable action (e.g., home cinema OFF)
 
-    - **Rotate left**: Volume down (one step per tick)
-
-    - **Hold (3s)**: Mute toggle
+    - **Hold (3s)**: Sync volume helper from device (use if out of sync)
 
 
-    Volume control uses the media player's native step size for immediate response.
-    Each knob tick sends one volume command. Commands are queued so rapid rotations
-    are never lost.
+    This blueprint debounces rapid rotations and sends a single volume command
+    after 200ms of no rotation. This matches the Arcam integration's throttle
+    for optimal responsiveness.
   domain: automation
   author: "Jan Singer"
   homeassistant:
@@ -52,25 +54,48 @@ blueprint:
           selector:
             text: {}
     media_player_settings:
-      name: "Media Player"
+      name: "Media Player & Volume"
       icon: mdi:speaker
       collapsed: false
-      description: "Media player entity to control."
+      description: "Media player entity and volume tracking helper."
       input:
         media_player:
           name: "Media Player Entity"
           description: >
-            The media player to control with the knob rotation.
-            Volume step size is determined by the device's native increment.
+            The media player to control (e.g., Arcam AV40).
           selector:
             entity:
               filter:
                 - domain: media_player
+        volume_helper:
+          name: "Volume Tracking Helper"
+          description: >
+            An input_number helper to track target volume. Create one at
+            Settings → Helpers → Number with min: 0, max: 1, step: 0.01.
+            This enables smooth volume control by tracking intended volume
+            locally, avoiding delays from slow device state updates.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        volume_step:
+          name: "Volume Step (%)"
+          description: >
+            Volume percentage change per rotation tick. The Arcam uses 0-99
+            internally, so 1% = 1 device step. 2% recommended for natural feel.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 10
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
     button_actions:
       name: "Button Actions"
       icon: mdi:gesture-tap
       collapsed: false
-      description: "Actions to run on single press, double press, and hold."
+      description: "Actions to run on single press and double press."
       input:
         single_press_action:
           name: "Single Press Action"
@@ -87,8 +112,7 @@ blueprint:
           selector:
             action: {}
 
-mode: queued
-max: 20
+mode: restart
 max_exceeded: silent
 
 trigger_variables:
@@ -103,8 +127,11 @@ action:
   - variables:
       payload: "{{ trigger.payload }}"
       media_player_id: !input media_player
+      volume_helper_id: !input volume_helper
+      volume_step: !input volume_step
       is_player_on: >-
         {{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}
+
   - choose:
       # --- Single Press: Home Cinema ON ---
       - conditions:
@@ -121,27 +148,56 @@ action:
           - "{{ payload == 'rotate_right' }}"
           - "{{ is_player_on }}"
         sequence:
-          - action: media_player.volume_up
+          # Update helper immediately (local, instant)
+          - action: input_number.set_value
+            target:
+              entity_id: !input volume_helper
+            data:
+              value: >-
+                {% set current = states(volume_helper_id) | float(0) %}
+                {% set step = volume_step / 100 %}
+                {{ [current + step, 1.0] | min }}
+          # Debounce: wait for more rotations
+          - delay:
+              milliseconds: 200
+          # Send final volume to device
+          - action: media_player.volume_set
             target:
               entity_id: !input media_player
+            data:
+              volume_level: "{{ states(volume_helper_id) | float(0) }}"
 
       # --- Rotate Left: Volume Down ---
       - conditions:
           - "{{ payload == 'rotate_left' }}"
           - "{{ is_player_on }}"
         sequence:
-          - action: media_player.volume_down
+          # Update helper immediately (local, instant)
+          - action: input_number.set_value
+            target:
+              entity_id: !input volume_helper
+            data:
+              value: >-
+                {% set current = states(volume_helper_id) | float(0) %}
+                {% set step = volume_step / 100 %}
+                {{ [current - step, 0.0] | max }}
+          # Debounce: wait for more rotations
+          - delay:
+              milliseconds: 200
+          # Send final volume to device
+          - action: media_player.volume_set
             target:
               entity_id: !input media_player
+            data:
+              volume_level: "{{ states(volume_helper_id) | float(0) }}"
 
-      # --- Hold: Mute Toggle ---
+      # --- Hold: Sync helper from device ---
       - conditions:
           - "{{ payload == 'hold' }}"
           - "{{ is_player_on }}"
         sequence:
-          - action: media_player.volume_mute
+          - action: input_number.set_value
             target:
-              entity_id: !input media_player
+              entity_id: !input volume_helper
             data:
-              is_volume_muted: >-
-                {{ not state_attr(media_player_id, 'is_volume_muted') }}
+              value: "{{ state_attr(media_player_id, 'volume_level') | float(0) }}"
