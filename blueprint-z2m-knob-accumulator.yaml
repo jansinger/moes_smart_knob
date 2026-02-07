@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Accumulator"
   description: >
-    **Version 4.0.0** - Part 1 of 2: Fast event accumulator
+    **Version 4.0.1** - Part 1 of 2: Fast event accumulator
 
 
     This blueprint handles all MOES Smart Knob events with `mode: queued`,

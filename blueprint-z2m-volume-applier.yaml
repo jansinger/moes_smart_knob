@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Volume Applier"
   description: >
-    **Version 4.0.0** - Part 2 of 2: Debounced volume applier
+    **Version 4.0.1** - Part 2 of 2: Debounced volume applier
 
 
     This blueprint applies accumulated rotations to a media player with natural debouncing.
@@ -100,6 +100,10 @@ trigger:
   - trigger: state
     entity_id: !input rotation_counter
 
+# Don't trigger when counter is reset to 0
+condition:
+  - "{{ trigger.to_state.state | int(0) != 0 }}"
+
 action:
   - variables:
       rotation_counter_id: !input rotation_counter
@@ -107,10 +111,6 @@ action:
       media_player_id: !input media_player
       volume_step: !input volume_step
       debounce_ms: !input debounce_ms
-
-  # Skip if counter is at 0 (e.g., after reset)
-  - condition: template
-    value_template: "{{ states(rotation_counter_id) | int(0) != 0 }}"
 
   # Wait for more rotations (debounce)
   - delay:
