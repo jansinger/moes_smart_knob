@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
   description: >
-    **Version 2.0.0** - Optimized for Arcam AV40 (200ms command throttle)
+    **Version 2.1.0** - Fixed rotation accumulation with wait_for_trigger
 
 
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
@@ -14,7 +14,7 @@ blueprint:
     **The knob must be in EVENT mode** (triple-click to switch modes).
 
 
-    - **Rotate right/left**: Volume up/down (all rotations counted, debounced)
+    - **Rotate right/left**: Volume up/down (all rotations accumulated)
 
     - **Single press**: Run configurable action (e.g., home cinema ON)
 
@@ -23,9 +23,7 @@ blueprint:
     - **Hold (3s)**: Sync volume helper from device (use if out of sync)
 
 
-    This blueprint debounces rapid rotations and sends a single volume command
-    after 200ms of no rotation. This matches the Arcam integration's throttle
-    for optimal responsiveness.
+    Rotations are collected in a 150ms window, then a single volume command is sent.
   domain: automation
   author: "Jan Singer"
   homeassistant:
@@ -72,8 +70,6 @@ blueprint:
           description: >
             An input_number helper to track target volume. Create one at
             Settings → Helpers → Number with min: 0, max: 1, step: 0.01.
-            This enables smooth volume control by tracking intended volume
-            locally, avoiding delays from slow device state updates.
           selector:
             entity:
               filter:
@@ -81,8 +77,7 @@ blueprint:
         volume_step:
           name: "Volume Step (%)"
           description: >
-            Volume percentage change per rotation tick. The Arcam uses 0-99
-            internally, so 1% = 1 device step. 2% recommended for natural feel.
+            Volume percentage change per rotation tick. 2% recommended.
           default: 2
           selector:
             number:
@@ -112,7 +107,7 @@ blueprint:
           selector:
             action: {}
 
-mode: restart
+mode: single
 max_exceeded: silent
 
 trigger_variables:
@@ -129,67 +124,90 @@ action:
       media_player_id: !input media_player
       volume_helper_id: !input volume_helper
       volume_step: !input volume_step
+      mqtt_topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
       is_player_on: >-
         {{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}
 
   - choose:
-      # --- Single Press: Home Cinema ON ---
+      # --- Single Press ---
       - conditions:
           - "{{ payload == 'single' }}"
         sequence: !input single_press_action
 
-      # --- Double Press: Home Cinema OFF ---
+      # --- Double Press ---
       - conditions:
           - "{{ payload == 'double' }}"
         sequence: !input double_press_action
 
-      # --- Rotate Right: Volume Up ---
+      # --- Rotation: Accumulate and apply ---
       - conditions:
-          - "{{ payload == 'rotate_right' }}"
+          - "{{ payload in ['rotate_right', 'rotate_left'] }}"
           - "{{ is_player_on }}"
         sequence:
-          # Update helper immediately (local, instant)
-          - action: input_number.set_value
-            target:
-              entity_id: !input volume_helper
-            data:
-              value: >-
-                {% set current = states(volume_helper_id) | float(0) %}
-                {% set step = volume_step / 100 %}
-                {{ [current + step, 1.0] | min }}
-          # Debounce: wait for more rotations
-          - delay:
-              milliseconds: 200
-          # Send final volume to device
-          - action: media_player.volume_set
-            target:
-              entity_id: !input media_player
-            data:
-              volume_level: "{{ states(volume_helper_id) | float(0) }}"
+          - variables:
+              step: "{{ volume_step / 100 }}"
+              direction: "{{ 1 if payload == 'rotate_right' else -1 }}"
 
-      # --- Rotate Left: Volume Down ---
-      - conditions:
-          - "{{ payload == 'rotate_left' }}"
-          - "{{ is_player_on }}"
-        sequence:
-          # Update helper immediately (local, instant)
+          # Apply first rotation to helper immediately
           - action: input_number.set_value
             target:
               entity_id: !input volume_helper
             data:
               value: >-
-                {% set current = states(volume_helper_id) | float(0) %}
-                {% set step = volume_step / 100 %}
-                {{ [current - step, 0.0] | max }}
-          # Debounce: wait for more rotations
-          - delay:
-              milliseconds: 200
+                {% set current = states(volume_helper_id) | float(0.5) %}
+                {% set new_vol = current + (step * direction) %}
+                {{ [[new_vol, 0.0] | max, 1.0] | min }}
+
+          # Accumulate more rotations in same direction
+          - repeat:
+              sequence:
+                - wait_for_trigger:
+                    - trigger: mqtt
+                      topic: "{{ mqtt_topic }}"
+                  timeout:
+                    milliseconds: 150
+                  continue_on_timeout: true
+
+                - if:
+                    - "{{ wait.trigger is not none and wait.trigger.payload == payload }}"
+                  then:
+                    - action: input_number.set_value
+                      target:
+                        entity_id: !input volume_helper
+                      data:
+                        value: >-
+                          {% set current = states(volume_helper_id) | float(0.5) %}
+                          {% set new_vol = current + (step * direction) %}
+                          {{ [[new_vol, 0.0] | max, 1.0] | min }}
+
+              until:
+                - "{{ wait.trigger is none or wait.trigger.payload != payload }}"
+
           # Send final volume to device
           - action: media_player.volume_set
             target:
               entity_id: !input media_player
             data:
-              volume_level: "{{ states(volume_helper_id) | float(0) }}"
+              volume_level: "{{ states(volume_helper_id) | float(0.5) }}"
+
+          # Handle any different action that was caught
+          - choose:
+              - conditions:
+                  - "{{ wait.trigger is not none and wait.trigger.payload == 'single' }}"
+                sequence: !input single_press_action
+              - conditions:
+                  - "{{ wait.trigger is not none and wait.trigger.payload == 'double' }}"
+                sequence: !input double_press_action
+              - conditions:
+                  - "{{ wait.trigger is not none and wait.trigger.payload == 'hold' }}"
+                sequence:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: !input volume_helper
+                    data:
+                      value: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
+              # Opposite rotation - start new accumulation would require recursion
+              # For now, it will be handled on next trigger
 
       # --- Hold: Sync helper from device ---
       - conditions:
@@ -200,4 +218,4 @@ action:
             target:
               entity_id: !input volume_helper
             data:
-              value: "{{ state_attr(media_player_id, 'volume_level') | float(0) }}"
+              value: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
