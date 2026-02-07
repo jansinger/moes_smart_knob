@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
   description: >
-    **Version 1.1.0** - Improved rotation responsiveness
+    **Version 1.2.0** - Fixed rotation responsiveness with queued commands
 
 
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
@@ -14,16 +14,16 @@ blueprint:
 
     - **Double press**: Run a configurable action (e.g., home cinema OFF script)
 
-    - **Rotate right**: Volume up
+    - **Rotate right**: Volume up (one step per tick)
 
-    - **Rotate left**: Volume down
+    - **Rotate left**: Volume down (one step per tick)
 
     - **Hold (3s)**: Mute toggle
 
 
-    Volume control uses `media_player.volume_set` with a configurable step size
-    for precise control. The media player must be on and available for volume
-    and mute operations to take effect.
+    Volume control uses the media player's native step size for immediate response.
+    Each knob tick sends one volume command. Commands are queued so rapid rotations
+    are never lost.
   domain: automation
   author: "Jan Singer"
   homeassistant:
@@ -55,30 +55,17 @@ blueprint:
       name: "Media Player"
       icon: mdi:speaker
       collapsed: false
-      description: "Media player entity and volume settings."
+      description: "Media player entity to control."
       input:
         media_player:
           name: "Media Player Entity"
           description: >
             The media player to control with the knob rotation.
-            Volume and mute commands are sent to this entity.
+            Volume step size is determined by the device's native increment.
           selector:
             entity:
               filter:
                 - domain: media_player
-        volume_step:
-          name: "Volume Step (%)"
-          description: >
-            Volume percentage change per rotation tick. Lower values give
-            finer control. 2% is recommended for AV receivers.
-          default: 2
-          selector:
-            number:
-              min: 1
-              max: 10
-              step: 1
-              unit_of_measurement: "%"
-              mode: slider
     button_actions:
       name: "Button Actions"
       icon: mdi:gesture-tap
@@ -100,7 +87,8 @@ blueprint:
           selector:
             action: {}
 
-mode: single
+mode: queued
+max: 20
 max_exceeded: silent
 
 trigger_variables:
@@ -115,7 +103,6 @@ action:
   - variables:
       payload: "{{ trigger.payload }}"
       media_player_id: !input media_player
-      volume_step: !input volume_step
       is_player_on: >-
         {{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}
   - choose:
@@ -129,57 +116,23 @@ action:
           - "{{ payload == 'double' }}"
         sequence: !input double_press_action
 
-      # --- Rotation: Volume Up/Down ---
+      # --- Rotate Right: Volume Up ---
       - conditions:
-          - "{{ payload in ['rotate_right', 'rotate_left'] }}"
+          - "{{ payload == 'rotate_right' }}"
           - "{{ is_player_on }}"
         sequence:
-          - variables:
-              direction: "{{ 1 if payload == 'rotate_right' else -1 }}"
-              initial_volume: "{{ state_attr(media_player_id, 'volume_level') | float(0) }}"
-              accumulated_steps: 1
-              rotation_payload: "{{ payload }}"
-              mqtt_topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
-
-          # Apply first step immediately for responsiveness
-          - action: media_player.volume_set
+          - action: media_player.volume_up
             target:
               entity_id: !input media_player
-            data:
-              volume_level: >-
-                {% set step = (volume_step * direction) / 100 %}
-                {% set new_vol = initial_volume + step %}
-                {{ [[new_vol, 0.0] | max, 1.0] | min }}
 
-          # Accumulate additional rapid rotations
-          - repeat:
-              sequence:
-                - wait_for_trigger:
-                    - trigger: mqtt
-                      topic: "{{ mqtt_topic }}"
-                  timeout:
-                    milliseconds: 150
-                  continue_on_timeout: true
-                - if:
-                    - "{{ wait.trigger is not none and wait.trigger.payload == rotation_payload }}"
-                  then:
-                    - variables:
-                        accumulated_steps: "{{ accumulated_steps + 1 }}"
-              until:
-                - "{{ wait.trigger is none or (wait.trigger is not none and wait.trigger.payload != rotation_payload) }}"
-
-          # Apply remaining accumulated steps
-          - if:
-              - "{{ accumulated_steps > 1 }}"
-            then:
-              - action: media_player.volume_set
-                target:
-                  entity_id: !input media_player
-                data:
-                  volume_level: >-
-                    {% set total_step = (accumulated_steps * volume_step * direction) / 100 %}
-                    {% set new_vol = initial_volume + total_step %}
-                    {{ [[new_vol, 0.0] | max, 1.0] | min }}
+      # --- Rotate Left: Volume Down ---
+      - conditions:
+          - "{{ payload == 'rotate_left' }}"
+          - "{{ is_player_on }}"
+        sequence:
+          - action: media_player.volume_down
+            target:
+              entity_id: !input media_player
 
       # --- Hold: Mute Toggle ---
       - conditions:
