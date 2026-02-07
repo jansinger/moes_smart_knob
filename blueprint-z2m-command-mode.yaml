@@ -1,0 +1,216 @@
+blueprint:
+  name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
+  description: >
+    **Version 1.0.0** - All-in-one COMMAND mode controller
+
+
+    Controls media player volume with intensity-aware rotation and toggles
+    home cinema based on JVC projector power state.
+
+
+    **Features:**
+
+    - Volume scaled by rotation speed (action_step_size)
+
+    - Single press toggles cinema ON/OFF based on JVC state
+
+    - Hold syncs volume display
+
+
+    **No helpers required** - simpler than EVENT mode blueprints.
+
+
+    **The knob must be in COMMAND mode** (triple-click to switch modes).
+    Verify in Z2M: Device → Exposes → operation_mode = "command"
+  domain: automation
+  author: "Jan Singer"
+  homeassistant:
+    min_version: "2024.6.0"
+  input:
+    mqtt_settings:
+      name: "MQTT Configuration"
+      icon: mdi:antenna
+      collapsed: false
+      description: "Zigbee2MQTT connection settings for the MOES Smart Knob."
+      input:
+        base_topic:
+          name: "Zigbee2MQTT Base Topic"
+          description: >
+            The base MQTT topic configured in your Zigbee2MQTT settings.
+            Default is `zigbee2mqtt` unless you changed it.
+          default: "zigbee2mqtt"
+          selector:
+            text: {}
+        mqtt_device_name:
+          name: "MQTT Device Friendly Name"
+          description: >
+            The friendly name of your MOES Smart Knob as configured in
+            Zigbee2MQTT (e.g., `Smart Knob`). This is used to
+            construct the MQTT topic: `<base_topic>/<friendly_name>`.
+          selector:
+            text: {}
+    media_settings:
+      name: "Media Player"
+      icon: mdi:speaker
+      collapsed: false
+      description: "Media player to control with the knob rotation."
+      input:
+        media_player:
+          name: "Media Player Entity"
+          description: >
+            The media player to control (e.g., Arcam AV40).
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+    cinema_settings:
+      name: "Cinema Control"
+      icon: mdi:projector
+      collapsed: false
+      description: "JVC projector sensor and cinema scripts for toggle control."
+      input:
+        jvc_power_sensor:
+          name: "JVC Projector Power Sensor"
+          description: >
+            The sensor showing JVC projector power state.
+            Toggle will turn cinema ON when standby, OFF when on.
+            States like warming/cooling/error are ignored.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        cinema_on_script:
+          name: "Cinema ON Script"
+          description: >
+            Script to run when turning the home cinema ON.
+          selector:
+            entity:
+              filter:
+                - domain: script
+        cinema_off_script:
+          name: "Cinema OFF Script"
+          description: >
+            Script to run when turning the home cinema OFF.
+          selector:
+            entity:
+              filter:
+                - domain: script
+    volume_settings:
+      name: "Volume Settings"
+      icon: mdi:volume-high
+      collapsed: true
+      description: "Fine-tune volume control behavior."
+      input:
+        volume_multiplier:
+          name: "Volume Multiplier"
+          description: >
+            Scale factor for volume changes. Higher = more sensitive.
+            The knob provides action_step_size (0-255) indicating rotation speed.
+            This multiplier adjusts how much volume changes per rotation.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 5
+              step: 0.5
+              mode: slider
+        max_volume_step:
+          name: "Maximum Volume Step (%)"
+          description: >
+            Maximum volume change per single rotation event.
+            Limits how much a fast rotation can change volume at once.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 20
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+
+# Restart mode: rapid rotations apply the latest value
+mode: restart
+
+trigger_variables:
+  base_topic: !input base_topic
+  mqtt_device_name: !input mqtt_device_name
+
+trigger:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
+
+# Only process when action field is not empty
+condition:
+  - "{{ trigger.payload_json.action | default('') != '' }}"
+
+action:
+  - variables:
+      payload: "{{ trigger.payload_json.action }}"
+      step_size: "{{ trigger.payload_json.action_step_size | default(13) | int }}"
+      media_player_id: !input media_player
+      jvc_sensor_id: !input jvc_power_sensor
+      volume_multiplier: !input volume_multiplier
+      max_volume_step: !input max_volume_step
+      # Calculate step as percentage (0-1 scale)
+      # step_size is 0-255, normalize to 0-1, then apply multiplier and max
+      step_percent: >-
+        {{ (step_size / 255) * (max_volume_step / 100) * volume_multiplier }}
+      current_vol: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
+      new_vol_up: "{{ [[current_vol + step_percent, 0.0] | max, 1.0] | min }}"
+      new_vol_down: "{{ [[current_vol - step_percent, 0.0] | max, 1.0] | min }}"
+
+  - choose:
+      # --- Rotate Right: Volume Up ---
+      - conditions:
+          - "{{ payload == 'brightness_step_up' }}"
+        sequence:
+          - condition: template
+            value_template: "{{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}"
+          - action: media_player.volume_set
+            target:
+              entity_id: !input media_player
+            data:
+              volume_level: "{{ new_vol_up }}"
+
+      # --- Rotate Left: Volume Down ---
+      - conditions:
+          - "{{ payload == 'brightness_step_down' }}"
+        sequence:
+          - condition: template
+            value_template: "{{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}"
+          - action: media_player.volume_set
+            target:
+              entity_id: !input media_player
+            data:
+              volume_level: "{{ new_vol_down }}"
+
+      # --- Toggle: Cinema control based on JVC state ---
+      - conditions:
+          - "{{ payload == 'toggle' }}"
+        sequence:
+          - choose:
+              # JVC is ON -> Turn cinema OFF
+              - conditions:
+                  - "{{ states(jvc_sensor_id) == 'on' }}"
+                sequence:
+                  - action: script.turn_on
+                    target:
+                      entity_id: !input cinema_off_script
+              # JVC is STANDBY -> Turn cinema ON
+              - conditions:
+                  - "{{ states(jvc_sensor_id) == 'standby' }}"
+                sequence:
+                  - action: script.turn_on
+                    target:
+                      entity_id: !input cinema_on_script
+            # Default: do nothing (warming, cooling, error, unavailable)
+
+      # --- Hold Release: Sync/display current volume ---
+      - conditions:
+          - "{{ payload == 'hue_stop' }}"
+        sequence:
+          - action: persistent_notification.create
+            data:
+              title: "Volume"
+              message: "Current volume: {{ (state_attr(media_player_id, 'volume_level') | float(0) * 100) | round(0) }}%"
+              notification_id: "smart_knob_volume"
