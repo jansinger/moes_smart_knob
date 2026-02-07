@@ -1,20 +1,23 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
   description: >
-    **Version 2.1.0** - Fixed rotation accumulation with wait_for_trigger
+    **Version 3.0.0** - Counter-based accumulation (fixes variable scoping)
 
 
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.
 
 
-    **Requires an input_number helper** to track target volume. Create one at
-    Settings → Helpers → Number (min: 0, max: 1, step: 0.01).
+    **Requires two helpers:**
+
+    1. **Counter** (Settings → Helpers → Counter): min: -100, max: 100, initial: 0
+
+    2. **Input Number** (Settings → Helpers → Number): min: 0, max: 1, step: 0.01
 
 
     **The knob must be in EVENT mode** (triple-click to switch modes).
 
 
-    - **Rotate right/left**: Volume up/down (all rotations accumulated)
+    - **Rotate right/left**: Volume up/down (all rotations accumulated atomically)
 
     - **Single press**: Run configurable action (e.g., home cinema ON)
 
@@ -23,7 +26,8 @@ blueprint:
     - **Hold (3s)**: Sync volume helper from device (use if out of sync)
 
 
-    Rotations are collected in a 150ms window, then a single volume command is sent.
+    Rotations are collected in a 150ms window using atomic counter operations,
+    then a single volume command is sent.
   domain: automation
   author: "Jan Singer"
   homeassistant:
@@ -55,7 +59,7 @@ blueprint:
       name: "Media Player & Volume"
       icon: mdi:speaker
       collapsed: false
-      description: "Media player entity and volume tracking helper."
+      description: "Media player entity and volume tracking helpers."
       input:
         media_player:
           name: "Media Player Entity"
@@ -74,6 +78,15 @@ blueprint:
             entity:
               filter:
                 - domain: input_number
+        rotation_counter:
+          name: "Rotation Counter"
+          description: >
+            A counter helper to accumulate rotations atomically. Create one at
+            Settings → Helpers → Counter with min: -100, max: 100, initial: 0.
+          selector:
+            entity:
+              filter:
+                - domain: counter
         volume_step:
           name: "Volume Step (%)"
           description: >
@@ -123,6 +136,7 @@ action:
       payload: "{{ trigger.payload }}"
       media_player_id: !input media_player
       volume_helper_id: !input volume_helper
+      rotation_counter_id: !input rotation_counter
       volume_step: !input volume_step
       mqtt_topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
       is_player_on: >-
@@ -139,26 +153,17 @@ action:
           - "{{ payload == 'double' }}"
         sequence: !input double_press_action
 
-      # --- Rotation: Accumulate and apply ---
+      # --- Rotation: Accumulate with counter and apply ---
       - conditions:
           - "{{ payload in ['rotate_right', 'rotate_left'] }}"
           - "{{ is_player_on }}"
         sequence:
-          - variables:
-              step: "{{ volume_step / 100 }}"
-              direction: "{{ 1 if payload == 'rotate_right' else -1 }}"
-
-          # Apply first rotation to helper immediately
-          - action: input_number.set_value
+          # Step 1: Record this rotation using atomic counter operation
+          - action: "counter.{{ 'increment' if payload == 'rotate_right' else 'decrement' }}"
             target:
-              entity_id: !input volume_helper
-            data:
-              value: >-
-                {% set current = states(volume_helper_id) | float(0.5) %}
-                {% set new_vol = current + (step * direction) %}
-                {{ [[new_vol, 0.0] | max, 1.0] | min }}
+              entity_id: !input rotation_counter
 
-          # Accumulate more rotations in same direction
+          # Step 2: Collect more rotations in 150ms window
           - repeat:
               sequence:
                 - wait_for_trigger:
@@ -168,29 +173,49 @@ action:
                     milliseconds: 150
                   continue_on_timeout: true
 
-                - if:
-                    - "{{ wait.trigger is not none and wait.trigger.payload == payload }}"
-                  then:
-                    - action: input_number.set_value
-                      target:
-                        entity_id: !input volume_helper
-                      data:
-                        value: >-
-                          {% set current = states(volume_helper_id) | float(0.5) %}
-                          {% set new_vol = current + (step * direction) %}
-                          {{ [[new_vol, 0.0] | max, 1.0] | min }}
+                - choose:
+                    - conditions:
+                        - "{{ wait.trigger is not none and wait.trigger.payload == 'rotate_right' }}"
+                      sequence:
+                        - action: counter.increment
+                          target:
+                            entity_id: !input rotation_counter
+                    - conditions:
+                        - "{{ wait.trigger is not none and wait.trigger.payload == 'rotate_left' }}"
+                      sequence:
+                        - action: counter.decrement
+                          target:
+                            entity_id: !input rotation_counter
 
               until:
-                - "{{ wait.trigger is none or wait.trigger.payload != payload }}"
+                - "{{ wait.trigger is none or wait.trigger.payload not in ['rotate_right', 'rotate_left'] }}"
 
-          # Send final volume to device
+          # Step 3: Read counter and calculate new volume
+          - variables:
+              rotation_count: "{{ states(rotation_counter_id) | int(0) }}"
+              current_vol: "{{ states(volume_helper_id) | float(0.5) }}"
+              new_vol: "{{ [[current_vol + (rotation_count * volume_step / 100), 0.0] | max, 1.0] | min }}"
+
+          # Step 4: Reset counter for next rotation sequence
+          - action: counter.reset
+            target:
+              entity_id: !input rotation_counter
+
+          # Step 5: Update shadow volume helper
+          - action: input_number.set_value
+            target:
+              entity_id: !input volume_helper
+            data:
+              value: "{{ new_vol }}"
+
+          # Step 6: Send final volume to device
           - action: media_player.volume_set
             target:
               entity_id: !input media_player
             data:
-              volume_level: "{{ states(volume_helper_id) | float(0.5) }}"
+              volume_level: "{{ new_vol }}"
 
-          # Handle any different action that was caught
+          # Step 7: Handle any button press that was caught during rotation
           - choose:
               - conditions:
                   - "{{ wait.trigger is not none and wait.trigger.payload == 'single' }}"
@@ -206,8 +231,6 @@ action:
                       entity_id: !input volume_helper
                     data:
                       value: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
-              # Opposite rotation - start new accumulation would require recursion
-              # For now, it will be handled on next trigger
 
       # --- Hold: Sync helper from device ---
       - conditions:
