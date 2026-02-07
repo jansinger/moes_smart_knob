@@ -1,7 +1,22 @@
 blueprint:
-  name: "Zigbee2MQTT - MOES Smart Knob Media Player Control"
+  name: "Zigbee2MQTT - MOES Smart Knob Media Player Control (Legacy)"
   description: >
-    **Version 3.0.0** - Counter-based accumulation (fixes variable scoping)
+    **Version 3.0.0** - SUPERSEDED by v4.0.0 two-automation approach
+
+
+    ⚠️ **This blueprint has been replaced by:**
+
+    - `blueprint-z2m-knob-accumulator.yaml` (Part 1)
+
+    - `blueprint-z2m-volume-applier.yaml` (Part 2)
+
+
+    The two-automation approach fixes the issue where rapid rotations are dropped
+    because `mode: single` + `max_exceeded: silent` silently discards events that
+    arrive before `wait_for_trigger` starts.
+
+
+    ---
 
 
     Control a media player with a MOES Smart Knob (ERS-10TZBVK-AA) via Zigbee2MQTT.

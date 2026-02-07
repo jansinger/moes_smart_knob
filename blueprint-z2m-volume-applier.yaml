@@ -1,0 +1,145 @@
+blueprint:
+  name: "Zigbee2MQTT - MOES Smart Knob Volume Applier"
+  description: >
+    **Version 4.0.0** - Part 2 of 2: Debounced volume applier
+
+
+    This blueprint applies accumulated rotations to a media player with natural debouncing.
+
+
+    **Requires a paired "Accumulator" automation** to capture knob events.
+
+
+    **How it works:**
+
+    - Triggers on counter state changes (from the Accumulator)
+
+    - Uses `mode: restart` so each change restarts the 200ms delay
+
+    - When rotations stop, reads counter, calculates volume, sends ONE command
+
+    - Resets counter for next rotation sequence
+
+
+    **Required helpers (same as Accumulator):**
+
+    1. **Counter** (Settings → Helpers → Counter): min: -100, max: 100, initial: 0
+
+    2. **Input Number** (Settings → Helpers → Number): min: 0, max: 1, step: 0.01
+  domain: automation
+  author: "Jan Singer"
+  homeassistant:
+    min_version: "2024.6.0"
+  input:
+    helpers:
+      name: "Helpers & Media Player"
+      icon: mdi:database
+      collapsed: false
+      description: "Counter, volume tracking helper, and media player."
+      input:
+        rotation_counter:
+          name: "Rotation Counter"
+          description: >
+            The same counter helper used by the Accumulator automation.
+          selector:
+            entity:
+              filter:
+                - domain: counter
+        volume_helper:
+          name: "Volume Tracking Helper"
+          description: >
+            The same input_number helper used by the Accumulator automation.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        media_player:
+          name: "Media Player Entity"
+          description: >
+            The media player to control (e.g., Arcam AV40).
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+    volume_settings:
+      name: "Volume Settings"
+      icon: mdi:volume-high
+      collapsed: false
+      description: "Volume step configuration."
+      input:
+        volume_step:
+          name: "Volume Step (%)"
+          description: >
+            Volume percentage change per rotation tick. 2% recommended.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 10
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        debounce_ms:
+          name: "Debounce Delay (ms)"
+          description: >
+            Milliseconds to wait after last rotation before applying volume.
+            200ms is a good balance between responsiveness and batching.
+          default: 200
+          selector:
+            number:
+              min: 100
+              max: 500
+              step: 50
+              unit_of_measurement: "ms"
+              mode: slider
+
+# Restart mode: each counter change restarts the delay timer
+mode: restart
+
+trigger:
+  - trigger: state
+    entity_id: !input rotation_counter
+
+action:
+  - variables:
+      rotation_counter_id: !input rotation_counter
+      volume_helper_id: !input volume_helper
+      media_player_id: !input media_player
+      volume_step: !input volume_step
+      debounce_ms: !input debounce_ms
+
+  # Skip if counter is at 0 (e.g., after reset)
+  - condition: template
+    value_template: "{{ states(rotation_counter_id) | int(0) != 0 }}"
+
+  # Wait for more rotations (debounce)
+  - delay:
+      milliseconds: "{{ debounce_ms }}"
+
+  # Read accumulated rotation count
+  - variables:
+      rotation_count: "{{ states(rotation_counter_id) | int(0) }}"
+      current_vol: "{{ states(volume_helper_id) | float(0.5) }}"
+      new_vol: "{{ [[current_vol + (rotation_count * volume_step / 100), 0.0] | max, 1.0] | min }}"
+
+  # Reset counter for next rotation sequence
+  - action: counter.reset
+    target:
+      entity_id: !input rotation_counter
+
+  # Update shadow volume helper
+  - action: input_number.set_value
+    target:
+      entity_id: !input volume_helper
+    data:
+      value: "{{ new_vol }}"
+
+  # Send volume to media player (only if on)
+  - condition: template
+    value_template: "{{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}"
+
+  - action: media_player.volume_set
+    target:
+      entity_id: !input media_player
+    data:
+      volume_level: "{{ new_vol }}"

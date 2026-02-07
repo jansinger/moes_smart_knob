@@ -1,0 +1,166 @@
+blueprint:
+  name: "Zigbee2MQTT - MOES Smart Knob Accumulator"
+  description: >
+    **Version 4.0.0** - Part 1 of 2: Fast event accumulator
+
+
+    This blueprint handles all MOES Smart Knob events with `mode: queued`,
+    ensuring **no rotation events are dropped** during rapid knob turns.
+
+
+    **Requires a paired "Volume Applier" automation** to actually apply volume changes.
+
+
+    **How it works:**
+
+    - Rotations increment/decrement a counter (atomic, fast)
+
+    - Button presses (single/double) run actions directly
+
+    - Hold syncs volume helper from device
+
+
+    **Required helpers:**
+
+    1. **Counter** (Settings → Helpers → Counter): min: -100, max: 100, initial: 0
+
+    2. **Input Number** (Settings → Helpers → Number): min: 0, max: 1, step: 0.01
+
+
+    **The knob must be in EVENT mode** (triple-click to switch modes).
+  domain: automation
+  author: "Jan Singer"
+  homeassistant:
+    min_version: "2024.6.0"
+  input:
+    mqtt_settings:
+      name: "MQTT Configuration"
+      icon: mdi:antenna
+      collapsed: false
+      description: "Zigbee2MQTT connection settings for the MOES Smart Knob."
+      input:
+        base_topic:
+          name: "Zigbee2MQTT Base Topic"
+          description: >
+            The base MQTT topic configured in your Zigbee2MQTT settings.
+            Default is `zigbee2mqtt` unless you changed it.
+          default: "zigbee2mqtt"
+          selector:
+            text: {}
+        mqtt_device_name:
+          name: "MQTT Device Friendly Name"
+          description: >
+            The friendly name of your MOES Smart Knob as configured in
+            Zigbee2MQTT (e.g., `moes_knob_living_room`). This is used to
+            construct the MQTT topic: `<base_topic>/<friendly_name>/action`.
+          selector:
+            text: {}
+    helpers:
+      name: "Helpers"
+      icon: mdi:database
+      collapsed: false
+      description: "Counter and volume tracking helpers."
+      input:
+        rotation_counter:
+          name: "Rotation Counter"
+          description: >
+            A counter helper to accumulate rotations atomically. Create one at
+            Settings → Helpers → Counter with min: -100, max: 100, initial: 0.
+          selector:
+            entity:
+              filter:
+                - domain: counter
+        volume_helper:
+          name: "Volume Tracking Helper"
+          description: >
+            An input_number helper to track target volume. Create one at
+            Settings → Helpers → Number with min: 0, max: 1, step: 0.01.
+            Used by Hold action to sync from device.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        media_player:
+          name: "Media Player Entity"
+          description: >
+            The media player to read volume from (for Hold sync action).
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+    button_actions:
+      name: "Button Actions"
+      icon: mdi:gesture-tap
+      collapsed: false
+      description: "Actions to run on single press and double press."
+      input:
+        single_press_action:
+          name: "Single Press Action"
+          description: >
+            Action to run on a single press (e.g., run a home cinema ON script).
+          default: []
+          selector:
+            action: {}
+        double_press_action:
+          name: "Double Press Action"
+          description: >
+            Action to run on a double press (e.g., run a home cinema OFF script).
+          default: []
+          selector:
+            action: {}
+
+# Queued mode ensures NO events are dropped - each rotation is processed
+mode: queued
+max: 50
+max_exceeded: silent
+
+trigger_variables:
+  base_topic: !input base_topic
+  mqtt_device_name: !input mqtt_device_name
+
+trigger:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name ~ '/action' }}"
+
+action:
+  - variables:
+      payload: "{{ trigger.payload }}"
+      media_player_id: !input media_player
+      volume_helper_id: !input volume_helper
+
+  - choose:
+      # --- Rotate Right: Increment counter ---
+      - conditions:
+          - "{{ payload == 'rotate_right' }}"
+        sequence:
+          - action: counter.increment
+            target:
+              entity_id: !input rotation_counter
+
+      # --- Rotate Left: Decrement counter ---
+      - conditions:
+          - "{{ payload == 'rotate_left' }}"
+        sequence:
+          - action: counter.decrement
+            target:
+              entity_id: !input rotation_counter
+
+      # --- Single Press ---
+      - conditions:
+          - "{{ payload == 'single' }}"
+        sequence: !input single_press_action
+
+      # --- Double Press ---
+      - conditions:
+          - "{{ payload == 'double' }}"
+        sequence: !input double_press_action
+
+      # --- Hold: Sync volume helper from device ---
+      - conditions:
+          - "{{ payload == 'hold' }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: !input volume_helper
+            data:
+              value: "{{ state_attr(media_player_id, 'volume_level') | float(0.5) }}"
