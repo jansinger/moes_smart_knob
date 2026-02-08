@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
   description: >
-    **Version 1.4.0** - All-in-one COMMAND mode controller
+    **Version 1.5.0** - All-in-one COMMAND mode controller
 
 
     Controls media player volume with intensity-aware rotation and toggles
@@ -68,12 +68,33 @@ blueprint:
       name: "Media Player"
       icon: mdi:speaker
       collapsed: false
-      description: "Media player to control with the knob rotation."
+      description: "Media players to control. Volume target is required, others are optional overrides."
       input:
         media_player:
-          name: "Media Player Entity"
+          name: "Volume Target (Primary)"
           description: >
-            The media player to control (e.g., Arcam AV40).
+            The media player for volume control (rotation).
+            Also used as fallback for mute/play if not specified below.
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+        media_player_mute:
+          name: "Mute Target (Optional)"
+          description: >
+            Override: Media player for mute toggle (single press).
+            Leave empty to use the volume target above.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: media_player
+        media_player_play:
+          name: "Play/Pause Target (Optional)"
+          description: >
+            Override: Media player for play/pause (double press).
+            Leave empty to use the volume target above.
+          default: ""
           selector:
             entity:
               filter:
@@ -189,7 +210,12 @@ action:
       # Use default(13, true) to also replace null/None values, not just missing keys
       raw_step: "{{ trigger.payload_json.action_step_size | default(13, true) | int }}"
       step_size: "{{ [raw_step, 13] | max }}"
+      # Media player targets (with fallback to primary)
       media_player_id: !input media_player
+      media_player_mute_input: !input media_player_mute
+      media_player_play_input: !input media_player_play
+      mute_target: "{{ media_player_mute_input if media_player_mute_input else media_player_id }}"
+      play_target: "{{ media_player_play_input if media_player_play_input else media_player_id }}"
       jvc_sensor_id: !input jvc_power_sensor
       volume_multiplier: !input volume_multiplier
       max_volume_step: !input max_volume_step
@@ -251,19 +277,19 @@ action:
                   - "{{ wait.trigger != none }}"
                 sequence:
                   - condition: template
-                    value_template: "{{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}"
+                    value_template: "{{ states(play_target) not in ['off', 'unavailable', 'unknown'] }}"
                   - action: media_player.media_play_pause
                     target:
-                      entity_id: !input media_player
+                      entity_id: "{{ play_target }}"
             # --- Single Press: Mute toggle ---
             default:
               - condition: template
-                value_template: "{{ states(media_player_id) not in ['off', 'unavailable', 'unknown'] }}"
+                value_template: "{{ states(mute_target) not in ['off', 'unavailable', 'unknown'] }}"
               - action: media_player.volume_mute
                 target:
-                  entity_id: !input media_player
+                  entity_id: "{{ mute_target }}"
                 data:
-                  is_volume_muted: "{{ not state_attr(media_player_id, 'is_volume_muted') }}"
+                  is_volume_muted: "{{ not state_attr(mute_target, 'is_volume_muted') }}"
 
       # --- Long Press (>3s): Cinema control based on JVC state ---
       - conditions:
