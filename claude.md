@@ -5,10 +5,30 @@
 Create a Home Assistant blueprint for the **MOES Smart Knob (Tuya ERS-10TZBVK-AA)** via **Zigbee2MQTT** to control:
 
 1. **Media Player volume** (Arcam AV40) via knob rotation
-2. **Home Cinema On script** via single press
-3. **Home Cinema Off script** via double press
+2. **Home Cinema toggle** via single press (based on JVC projector state)
 
 The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
+
+## Current Implementation
+
+**File:** `blueprint-z2m-command-mode.yaml` (v1.1.1)
+
+**Mode:** COMMAND mode (triple-click to switch)
+
+| Knob Action | MQTT Action | Result |
+|-------------|-------------|--------|
+| Rotate right | `brightness_step_up` | Volume up (scaled by action_step_size) |
+| Rotate left | `brightness_step_down` | Volume down (scaled by action_step_size) |
+| Single press | `toggle` | Cinema ON if JVC=standby, OFF if JVC=on |
+| Hold release | `hue_stop` | Shows current volume notification |
+
+**User's Entity IDs:**
+- Media player: `media_player.arcam_...`
+- JVC power sensor: `sensor.jvc_projector_energiestatus`
+- Cinema ON script: `script.heimkino_an`
+- Cinema OFF script: `script.heimkino_aus`
+
+---
 
 ## Target Environment
 
@@ -31,19 +51,7 @@ The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
 
 The knob has two modes, switched by **triple-click**:
 
-#### EVENT Mode (recommended for this project)
-
-| User Action    | `action` value |
-|----------------|----------------|
-| Rotate Left    | `rotate_left`  |
-| Rotate Right   | `rotate_right` |
-| Single Click   | `single`       |
-| Double Click   | `double`       |
-| Hold (>3s)     | `hold`         |
-
-- `action_step_size`, `action_transition_time`, `action_rate` are **null** in event mode
-
-#### COMMAND Mode
+#### COMMAND Mode (recommended - used in current implementation)
 
 | User Action                   | `action` value                  |
 |-------------------------------|---------------------------------|
@@ -55,36 +63,112 @@ The knob has two modes, switched by **triple-click**:
 | Push+Hold + Rotate Left       | `color_temperature_step_down`   |
 | Push+Hold + Rotate Right      | `color_temperature_step_up`     |
 
-- `action_step_size` is 0-255 in command mode (indicates rotation amount)
+- `action_step_size` is 0-255 for rotation actions (indicates rotation speed/amount)
+- `action_step_size` is **null** for non-rotation actions (toggle, hue_stop, etc.)
 - `action_rate` is 0-255
+
+**Advantages:**
+- `action_step_size` allows intensity-aware volume control
+- Single blueprint, no helpers required
+- Simpler setup
+
+**Trade-off:**
+- No `double` press available (only in EVENT mode)
+
+#### EVENT Mode (alternative)
+
+| User Action    | `action` value |
+|----------------|----------------|
+| Rotate Left    | `rotate_left`  |
+| Rotate Right   | `rotate_right` |
+| Single Click   | `single`       |
+| Double Click   | `double`       |
+| Hold (>3s)     | `hold`         |
+
+- `action_step_size`, `action_transition_time`, `action_rate` are **null** in event mode
+- Requires counter helper + accumulator pattern for reliable fast rotation
 
 ### MQTT Topics
 
 - **State topic:** `zigbee2mqtt/<FRIENDLY_NAME>` (JSON payload with all properties)
 - **Action topic:** `zigbee2mqtt/<FRIENDLY_NAME>/action` (plain text action value)
-- **Set operation mode:** publish `{"operation_mode": "event"}` to `zigbee2mqtt/<FRIENDLY_NAME>/set`
-- **Read operation mode:** publish `{"operation_mode": ""}` to `zigbee2mqtt/<FRIENDLY_NAME>/get`
+- **Set operation mode:** publish `{"operation_mode": "command"}` to `zigbee2mqtt/<FRIENDLY_NAME>/set`
 
-### Example MQTT Payload (state topic)
+### Example MQTT Payload (COMMAND mode rotation)
 
 ```json
 {
-  "action": "single",
-  "action_rate": null,
-  "action_step_size": null,
+  "action": "brightness_step_up",
+  "action_rate": 50,
+  "action_step_size": 43,
   "action_transition_time": null,
   "battery": 100,
-  "brightness": 182,
-  "operation_mode": "event",
+  "operation_mode": "command",
   "linkquality": 109
 }
 ```
 
-### Known Issues
+### Example MQTT Payload (COMMAND mode toggle)
 
-- **Group 0 toggle problem:** The toggle action in command mode may control unexpected devices because manufacturers place devices in group 0 by default. Fix: create a Z2M group with a different ID and add the knob to it.
-- **action_step_size always zero:** Some users report `action_step_size` staying at 0 regardless of configuration. This is unreliable for volume scaling.
-- **Fast rotation detection:** Multiple quick rotations may register as single increments. The blueprint should handle this gracefully.
+```json
+{
+  "action": "toggle",
+  "action_rate": null,
+  "action_step_size": null,
+  "action_transition_time": null,
+  "battery": 100,
+  "operation_mode": "command",
+  "linkquality": 109
+}
+```
+
+---
+
+## Key Lessons Learned
+
+### 1. COMMAND vs EVENT Mode
+
+**COMMAND mode is simpler** for volume control because:
+- `action_step_size` provides rotation intensity (0-255)
+- No need for counter helpers or accumulator patterns
+- Single automation handles everything
+
+**EVENT mode requires two automations:**
+- Accumulator (mode: queued) to count rotations
+- Volume Applier (mode: restart) to apply debounced volume
+
+### 2. Null Handling in Jinja2
+
+**Critical:** In COMMAND mode, `action_step_size` is explicitly `null` for non-rotation actions.
+
+```yaml
+# WRONG - default() only catches MISSING keys, not null values
+raw_step: "{{ trigger.payload_json.action_step_size | default(13) | int }}"
+# Error: int got invalid input 'None'
+
+# CORRECT - default(value, true) also replaces null/None values
+raw_step: "{{ trigger.payload_json.action_step_size | default(13, true) | int }}"
+```
+
+### 3. Automation Mode for Rotation Events
+
+**Use `mode: queued`** (not `restart`) for rotation handling:
+- `mode: restart` drops events - only the last rotation is processed
+- `mode: queued` processes every rotation event in order
+- Set `max: 50` and `max_exceeded: silent` to handle rapid rotations
+
+### 4. MQTT Topic for Blueprints
+
+Use the **state topic** (JSON), not the `/action` topic (plain text):
+- State topic: `zigbee2mqtt/<FRIENDLY_NAME>` → JSON with all properties
+- Allows access to `action_step_size` from `trigger.payload_json`
+
+### 5. Volume Calculation Pattern
+
+```yaml
+# Clamp volume between 0.0 and 1.0
+new_vol: "{{ [[current_vol + step_percent, 0.0] | max, 1.0] | min }}"
+```
 
 ---
 
@@ -95,15 +179,12 @@ The knob has two modes, switched by **triple-click**:
 - Integration: `arcam_fmj`
 - Entity type: `media_player` (zone-based entities)
 - Communication: Local Polling (IoT class)
-- Setup: Config flow (auto-discovery or manual via Settings > Devices & Services)
 
 ### Power Control Limitation
 
-Arcam receivers **turn off their network port in standby**. The integration retries connection every 5 seconds. Workarounds for power-on:
-
-1. **Newer models (AV40):** Enable "HDMI & IP On" under HDMI Settings
-2. **IR blaster:** Send RC5 codes (Zone 1: Device 16, Function 123) via `arcam.turn_on` event
-3. **Serial gateway:** Most reliable communication method
+Arcam receivers **turn off their network port in standby**. Workarounds:
+1. **AV40:** Enable "HDMI & IP On" under HDMI Settings
+2. **IR blaster:** Send RC5 codes via `arcam.turn_on` event
 
 ### Relevant Services
 
@@ -112,89 +193,59 @@ Arcam receivers **turn off their network port in standby**. The integration retr
 | `media_player.volume_set`      | `volume_level` (float 0.0-1.0)      |
 | `media_player.volume_up`       | (none)                               |
 | `media_player.volume_down`     | (none)                               |
-| `media_player.volume_mute`     | `is_volume_muted` (bool)            |
-| `media_player.turn_on`         | (none)                               |
-| `media_player.turn_off`        | (none)                               |
-| `media_player.media_play`      | (none)                               |
-| `media_player.media_pause`     | (none)                               |
 
 ---
 
 ## Blueprint Design Decisions
 
-### Trigger Strategy: Direct MQTT Topic
+### Trigger Strategy: Direct MQTT State Topic
 
-Use `trigger: mqtt` subscribing to the `/action` topic. This is the **most reliable and blueprint-friendly** approach.
-
-**Rationale:**
-- MQTT Device Triggers (recommended by Z2M docs) **cannot be used in blueprints** because they require a specific `device_id` that cannot be templated.
-- Event entities (Z2M 2.0 experimental) are still subject to change and require `homeassistant: {experimental_event_entities: true}`.
-- Direct MQTT trigger on the `/action` topic is proven, reliable, and works across Z2M versions.
-- The `/action` topic publishes plain text action names (not JSON), making payload matching simple.
-
-### Operation Mode: EVENT
-
-Use **event mode** for the blueprint:
-- Provides `single`, `double`, `rotate_left`, `rotate_right` - exactly what we need
-- `double` is only available in event mode (not in command mode)
-- Trade-off: no `action_step_size` in event mode, so volume step must be configured as a blueprint input
-
-### Volume Control Approach
-
-Use `media_player.volume_set` with calculated volume level:
+Use `trigger: mqtt` subscribing to the state topic (not `/action`):
 
 ```yaml
-# Pattern for volume adjustment
-{% set current = state_attr(entity_id, 'volume_level') | float(0) %}
-{% set step = step_percent / 100 %}
-{% set new_vol = current + step %}  # or - step for volume down
-{{ [[ new_vol, 0.0 ] | max, 1.0] | min }}
+trigger_variables:
+  base_topic: !input base_topic
+  mqtt_device_name: !input mqtt_device_name
+
+trigger:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
+
+condition:
+  - "{{ trigger.payload_json.action | default('') != '' }}"
 ```
 
-**Why `volume_set` instead of `volume_up`/`volume_down`:**
-- `volume_set` provides precise, configurable step sizes
-- `volume_up`/`volume_down` use a fixed device-defined increment
-- For the Arcam AV40, fine-grained control is preferred
+**Rationale:**
+- State topic provides JSON with `action_step_size`
+- MQTT Device Triggers cannot be templated in blueprints
+- Condition filters out state updates without action changes
 
-### Automation Mode: `restart`
+### Cinema Toggle Logic
 
-Use `mode: restart` so rapid knob rotations cancel any in-progress actions and apply the latest rotation immediately. This prevents queuing issues with fast knob turns.
+Toggle based on JVC projector state to prevent double-triggers:
+
+```yaml
+choose:
+  - conditions: "{{ states(jvc_sensor_id) == 'on' }}"
+    sequence: # Turn cinema OFF
+  - conditions: "{{ states(jvc_sensor_id) == 'standby' }}"
+    sequence: # Turn cinema ON
+  # Default: do nothing (warming, cooling, error)
+```
 
 ---
 
 ## Blueprint Schema Best Practices (HA 2026.2)
 
-**Source:** https://www.home-assistant.io/docs/blueprint/schema/
+### Modern Syntax
 
-### Required Blueprint Fields
-
-```yaml
-blueprint:
-  name: "Short descriptive name"
-  description: "Markdown-supported description"
-  domain: automation  # or script, template
-  homeassistant:
-    min_version: "2024.6.0"  # if using input sections
-  author: "Author Name"
-  input:
-    # input definitions
-```
-
-### Input Selectors
-
-| Selector Type | Use Case                        |
-|---------------|---------------------------------|
-| `entity`      | Select HA entity                |
-| `device`      | Select HA device                |
-| `action`      | Define action sequences          |
-| `number`      | Numeric slider/box              |
-| `text`        | Text input                      |
-| `select`      | Dropdown options                |
-| `target`      | Entity/device/area targeting    |
+1. **Use `action:` instead of `service:`** - deprecated
+2. **Use `data:` instead of `data_template:`** - templates auto-detected
+3. **Use `trigger: mqtt` instead of `platform: mqtt`** - newer syntax
+4. **Use `!input` in `trigger_variables`** - not directly in trigger config
+5. **Use `default(value, true)`** - to also replace null values
 
 ### Input Sections (v2024.6.0+)
-
-Group related inputs visually with collapsible sections:
 
 ```yaml
 input:
@@ -202,143 +253,46 @@ input:
     name: "Section Title"
     icon: mdi:icon-name
     collapsed: true
-    description: "Section description"
     input:
       my_input:
-        name: "Input Name"
         selector:
           entity: {}
 ```
 
-### Trigger Syntax (Modern)
-
-Use `trigger:` keyword (not `platform:` at root level):
-
-```yaml
-trigger:
-  - trigger: mqtt       # modern syntax
-    topic: "..."
-```
-
-Note: `platform: mqtt` still works but `trigger: mqtt` is the newer style.
-
-### trigger_variables
-
-Use `trigger_variables` for values needed in trigger templates (evaluated at trigger setup time, not at runtime):
-
-```yaml
-trigger_variables:
-  my_var: !input some_input
-trigger:
-  - trigger: mqtt
-    topic: "{{ my_var }}"
-```
-
 ---
 
-## Reference Blueprints
+## Archived Blueprints
 
-### 1. pbergman Z2M Blueprint (generic, all actions)
+Previous EVENT mode implementation (in `archive/` folder):
+- `blueprint-z2m-knob-accumulator.yaml` - Part 1: Event capture with counter
+- `blueprint-z2m-volume-applier.yaml` - Part 2: Debounced volume application
+- `blueprint-z2m-media.yaml` - Legacy single-file EVENT mode
 
-**Source:** https://github.com/pbergman/ha-blueprints/blob/3fc7a18cd8ea34a82f5a955beea13c02a5f805d7/ERS-10TZBVK-AA.yaml
-
-**Key patterns:**
-- Uses `trigger_variables` for MQTT topic construction
-- Dual trigger: MQTT `/action` topic + state entity for mode changes
-- `choose` block maps payload strings to `!input` action sequences
-- Handles both event and command mode actions
-- `mode: single`, `max_exceeded: silent`
-
-### 2. Existing ZHA Media Blueprint (in this repo)
-
-**File:** `blueprint-zha-media.yaml`
-
-**Key patterns (to adapt from ZHA to Z2M):**
-- Volume control via `media_player.volume_set` with calculated level
-- Step percent as configurable input (default 10%)
-- Checks media player is on before adjusting volume
-- Uses `service_template` (deprecated - use `service` or `action` instead)
-
-**Issues to fix in Z2M version:**
-- Replace `service_template` with `action` (modern HA syntax)
-- Replace `data_template` with `data` (modern HA syntax)
-- Remove unnecessary `repeat` loop (`repeat.index < 2` runs only once)
-- Add double press support (not available in ZHA version)
-- Use direct MQTT trigger instead of `zha_event`
-
-### 3. Improved Light Control Blueprint
-
-**Source:** https://community.home-assistant.io/t/zigbee2mqtt-control-light-entity-including-press-turn-with-tuya-moes-smart-knob-ers-10tzbvk-aa-v1-1/787779
-
-**Key patterns:**
-- Extracts `action_step_size` from `trigger.payload_json` with fallback
-- Uses multiplier for sensitivity tuning
-- Clamps values to prevent over/underflow
-
----
-
-## Blueprint Implementation Plan
-
-### File: `blueprint-z2m-media.yaml`
-
-**Inputs:**
-- `mqtt_device_name` - Z2M friendly name of the knob
-- `base_topic` - Z2M base topic (default: `zigbee2mqtt`)
-- `media_player` - Target media player entity (Arcam AV40)
-- `volume_step` - Volume change per rotation tick (default: 5, range 1-20, as percentage)
-- `single_press_action` - Action for single press (home cinema ON script)
-- `double_press_action` - Action for double press (home cinema OFF script)
-
-**Trigger:** MQTT on `{{ base_topic }}/{{ mqtt_device_name }}/action`
-
-**Actions mapped:**
-| Knob Action    | Blueprint Action                     |
-|----------------|--------------------------------------|
-| `single`       | Run single_press_action input        |
-| `double`       | Run double_press_action input        |
-| `rotate_right` | Volume up by step_percent            |
-| `rotate_left`  | Volume down by step_percent          |
-| `hold`         | (optional: mute toggle)              |
-
-**Volume calculation:**
-```yaml
-action: media_player.volume_set
-target:
-  entity_id: !input media_player
-data:
-  volume_level: >-
-    {% set current = state_attr(media_player_id, 'volume_level') | float(0) %}
-    {% set step = volume_step / 100 %}
-    {% set new_vol = current + step %}
-    {{ [[new_vol, 0.0] | max, 1.0] | min }}
-```
-
----
-
-## Important Syntax Notes for HA 2026.2
-
-1. **Use `action:` instead of `service:`** - `service:` is deprecated in favor of `action:` for calling services in automations
-2. **Use `data:` instead of `data_template:`** - templates are auto-detected in `data:`
-3. **Use `trigger: mqtt` instead of `platform: mqtt`** - newer trigger syntax
-4. **Use `!input` references in `trigger_variables`** - not directly in trigger config
-5. **Blueprint `min_version`** - set if using features like input sections
+These required helpers (counter, input_number) and were more complex.
 
 ---
 
 ## Sources
 
+### Device Documentation
 - [Zigbee2MQTT ERS-10TZBVK-AA Device Page](https://www.zigbee2mqtt.io/devices/ERS-10TZBVK-AA.html)
+- [Z2M MQTT Topics and Messages](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html)
+- [Z2M HA Integration Guide](https://www.zigbee2mqtt.io/guide/usage/integrations/home_assistant.html)
+
+### Home Assistant
 - [Home Assistant Blueprint Schema](https://www.home-assistant.io/docs/blueprint/schema/)
 - [Home Assistant MQTT Trigger Docs](https://www.home-assistant.io/docs/automation/trigger/#mqtt-trigger)
 - [Home Assistant Media Player Services](https://www.home-assistant.io/integrations/media_player/)
 - [Arcam FMJ Integration](https://www.home-assistant.io/integrations/arcam_fmj)
+
+### Community Blueprints & Discussions
 - [pbergman Z2M Blueprint (GitHub)](https://github.com/pbergman/ha-blueprints/blob/3fc7a18cd8ea34a82f5a955beea13c02a5f805d7/ERS-10TZBVK-AA.yaml)
-- [SmartHomeCircle MOES Knob Guide](https://smarthomecircle.com/moes-zigbee-smart-knob-with-homeassistant)
-- [Z2M 2.0 Action Events Discussion](https://community.home-assistant.io/t/using-the-new-action-events-in-zigbee2mqtt-2-0/821709)
-- [Z2M HA Integration Guide](https://www.zigbee2mqtt.io/guide/usage/integrations/home_assistant.html)
 - [Improved Light Blueprint](https://community.home-assistant.io/t/zigbee2mqtt-control-light-entity-including-press-turn-with-tuya-moes-smart-knob-ers-10tzbvk-aa-v1-1/787779)
 - [MOES Knob Blueprint Exchange Thread](https://community.home-assistant.io/t/zigbee2mqtt-tuya-moes-smart-knob-ers-10tzbvk-aa/419989)
 - [Universal Smart Knob Blueprint](https://community.home-assistant.io/t/zha-deconz-zigbee2mqtt-tuya-ers-10tzbvk-aa-smart-knob-universal-blueprint-all-actions-double-click-events-control-lights-media-players-and-more-with-hooks/870899)
-- [Z2M MQTT Topics and Messages](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html)
 - [action_step_size Discussion](https://community.home-assistant.io/t/tuya-ers-10tzbvk-aa-and-setting-action-step-size/757172)
 - [Improved Tuya Smart Knob Blueprint](https://community.home-assistant.io/t/tuya-smart-knob-improved-blueprint-for-zigbee2mqtt/799168)
+- [Z2M 2.0 Action Events Discussion](https://community.home-assistant.io/t/using-the-new-action-events-in-zigbee2mqtt-2-0/821709)
+
+### Guides
+- [SmartHomeCircle MOES Knob Guide](https://smarthomecircle.com/moes-zigbee-smart-knob-with-homeassistant)
