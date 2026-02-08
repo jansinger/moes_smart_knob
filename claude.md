@@ -11,7 +11,7 @@ The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
 
 ## Current Implementation
 
-**File:** `blueprint-z2m-command-mode.yaml` (v1.1.1)
+**File:** `blueprint-z2m-command-mode.yaml` (v1.2.0)
 
 **Mode:** COMMAND mode (triple-click to switch)
 
@@ -155,7 +155,7 @@ raw_step: "{{ trigger.payload_json.action_step_size | default(13, true) | int }}
 **Use `mode: queued`** (not `restart`) for rotation handling:
 - `mode: restart` drops events - only the last rotation is processed
 - `mode: queued` processes every rotation event in order
-- Set `max: 50` and `max_exceeded: silent` to handle rapid rotations
+- Set `max: 100` and `max_exceeded: silent` to handle rapid rotations
 
 ### 4. MQTT Topic for Blueprints
 
@@ -169,6 +169,75 @@ Use the **state topic** (JSON), not the `/action` topic (plain text):
 # Clamp volume between 0.0 and 1.0
 new_vol: "{{ [[current_vol + step_percent, 0.0] | max, 1.0] | min }}"
 ```
+
+### 6. action_step_size Reliability
+
+**Community-Konsens:** `action_step_size` kann unzuverlässig sein!
+- Manche User berichten, dass es immer 0 bleibt
+- Nicht über Z2M konfigurierbar
+- **Empfehlung:** Immer mit Minimum-Floor absichern
+
+**Implementierte Lösung:**
+```yaml
+raw_step: "{{ trigger.payload_json.action_step_size | default(13, true) | int }}"
+step_size: "{{ [raw_step, 13] | max }}"  # Minimum 13 garantiert
+```
+
+### 7. MQTT QoS für zuverlässige Zustellung
+
+MQTT QoS 1 garantiert, dass Nachrichten mindestens einmal zugestellt werden:
+```yaml
+trigger:
+  - trigger: mqtt
+    topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
+    qos: 1  # Garantierte Zustellung
+```
+
+---
+
+## Troubleshooting & Optimierung
+
+### Verpasste Rotations-Events
+
+Wenn nicht jeder Rotationsschritt ankommt, prüfe folgende Ursachen:
+
+| Ursache | Prüfung | Lösung |
+|---------|---------|--------|
+| **Z2M Debounce** | Z2M → Device → Settings → Debounce | Auf 0 setzen oder leer lassen |
+| **Z2M Throttle** | Z2M → Device → Settings → Throttle | Nicht setzen / deaktivieren |
+| **Schlechtes Signal** | Z2M → Device → LQI-Wert | Sollte > 50 sein |
+| **Queue Overflow** | HA → Automation Traces → max_exceeded | max erhöhen (aktuell: 100) |
+| **Geräte-Firmware** | Nicht prüfbar | Nicht änderbar |
+
+### Z2M Geräte-Einstellungen (empfohlen)
+
+In Zigbee2MQTT → Devices → Smart Knob → Settings (Zahnrad):
+
+| Einstellung | Empfehlung | Grund |
+|-------------|------------|-------|
+| `debounce` | **Leer (0)** | Verhindert Zusammenfassen von Events |
+| `throttle` | **Nicht setzen** | Würde Events verwerfen |
+| `filtered_cache` | **Deaktiviert** | Erlaubt wiederholte gleiche Werte |
+| `qos` | **1 oder 2** | Garantierte Message-Zustellung |
+| `retain` | **false** | Keine alten Nachrichten beim Start |
+
+### Zigbee Netzwerk-Qualität
+
+- **LQI (Link Quality Indicator):** Sollte > 50 sein, idealerweise > 100
+- **Prüfung:** Z2M → Devices → Smart Knob → "About" Tab
+- **Verbesserung:**
+  - Knob näher an Router/Coordinator positionieren
+  - Zigbee Router (z.B. smarte Steckdosen) als Repeater verwenden
+  - Interferenzen mit WLAN (Kanal 11) vermeiden
+
+### Automation Traces prüfen
+
+1. HA → Einstellungen → Automationen
+2. Automation auswählen → Traces
+3. Prüfen auf:
+   - `max_exceeded` Warnungen → Queue zu klein
+   - Fehlende Trigger → Zigbee/MQTT Problem
+   - Condition-Fehler → action leer
 
 ---
 

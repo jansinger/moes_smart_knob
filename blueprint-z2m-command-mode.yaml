@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
   description: >
-    **Version 1.1.1** - All-in-one COMMAND mode controller
+    **Version 1.2.0** - All-in-one COMMAND mode controller
 
 
     Controls media player volume with intensity-aware rotation and toggles
@@ -123,8 +123,8 @@ blueprint:
           default: 2
           selector:
             number:
-              min: 1
-              max: 5
+              min: 0.5
+              max: 10
               step: 0.5
               mode: slider
         max_volume_step:
@@ -144,7 +144,7 @@ blueprint:
 # Queued mode: ensures NO rotation events are dropped
 # Each rotation is processed in order with its own action_step_size
 mode: queued
-max: 50
+max: 100
 max_exceeded: silent
 
 trigger_variables:
@@ -154,6 +154,7 @@ trigger_variables:
 trigger:
   - trigger: mqtt
     topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
+    qos: 1
 
 # Only process when action field is not empty
 condition:
