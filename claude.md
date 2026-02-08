@@ -11,7 +11,7 @@ The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
 
 ## Current Implementation
 
-**File:** `blueprint-z2m-command-mode.yaml` (v1.2.0)
+**File:** `blueprint-z2m-command-mode.yaml` (v1.3.0)
 
 **Mode:** COMMAND mode (triple-click to switch)
 
@@ -19,8 +19,8 @@ The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
 |-------------|-------------|--------|
 | Rotate right | `brightness_step_up` | Volume up (scaled by action_step_size) |
 | Rotate left | `brightness_step_down` | Volume down (scaled by action_step_size) |
-| Single press | `toggle` | Cinema ON if JVC=standby, OFF if JVC=on |
-| Hold release | `hue_stop` | Shows current volume notification |
+| Single press | `toggle` | Mute toggle |
+| Long press (>3s) | `hue_move` | Cinema ON if JVC=standby, OFF if JVC=on |
 
 **User's Entity IDs:**
 - Media player: `media_player.arcam_...`
