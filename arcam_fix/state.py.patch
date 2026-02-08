@@ -1,0 +1,16 @@
+--- a/src/arcam/fmj/state.py
++++ b/src/arcam/fmj/state.py
+@@ -XXX,6 +XXX,13 @@ class State:
+             await self._client.request(
+                 self._zn, CommandCodes.SIMULATE_RC5_IR_COMMAND, command
+             )
++            # Query mute state after RC5 command to update _state[MUTE]
++            try:
++                data = await self._client.request(
++                    self._zn, CommandCodes.MUTE, bytes([0xF0])
++                )
++                self._state[CommandCodes.MUTE] = data
++            except Exception:
++                pass  # State will update on next poll
+
+     async def set_power(self, power: bool) -> None:
