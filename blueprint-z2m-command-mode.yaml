@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
   description: >
-    **Version 1.5.1** - All-in-one COMMAND mode controller
+    **Version 1.5.2** - All-in-one COMMAND mode controller
 
 
     Controls media player volume with intensity-aware rotation and toggles
@@ -264,8 +264,9 @@ action:
               mqtt_topic: "{{ base_topic ~ '/' ~ mqtt_device_name }}"
           # Skip if another instance is already waiting for double-press
           # (this toggle will be caught by that instance's wait_for_trigger)
+          # current=0 means we're the first toggle, current>=1 means another is waiting
           - condition: template
-            value_template: "{{ this.attributes.current <= 1 }}"
+            value_template: "{{ this.attributes.current < 1 }}"
           # Wait for potential second press
           - wait_for_trigger:
               - trigger: mqtt
