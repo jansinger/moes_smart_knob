@@ -11,7 +11,7 @@ The home cinema scripts control: Arcam AV40 media player, JVC Beamer, Apple TV.
 
 ## Current Implementation
 
-**File:** `blueprint-z2m-command-mode.yaml` (v1.5.0)
+**File:** `blueprint-z2m-command-mode.yaml` (v1.5.1)
 
 **Mode:** COMMAND mode (triple-click to switch)
 
