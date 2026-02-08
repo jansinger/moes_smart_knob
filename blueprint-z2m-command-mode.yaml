@@ -1,7 +1,7 @@
 blueprint:
   name: "Zigbee2MQTT - MOES Smart Knob COMMAND Mode"
   description: >
-    **Version 1.1.0** - All-in-one COMMAND mode controller
+    **Version 1.1.1** - All-in-one COMMAND mode controller
 
 
     Controls media player volume with intensity-aware rotation and toggles
@@ -162,8 +162,9 @@ condition:
 action:
   - variables:
       payload: "{{ trigger.payload_json.action }}"
-      # action_step_size: 0-255, but sometimes reports 0 - use minimum of 13
-      raw_step: "{{ trigger.payload_json.action_step_size | default(13) | int }}"
+      # action_step_size: 0-255, but is null for non-rotation actions (toggle, hue_stop)
+      # Use default(13, true) to also replace null/None values, not just missing keys
+      raw_step: "{{ trigger.payload_json.action_step_size | default(13, true) | int }}"
       step_size: "{{ [raw_step, 13] | max }}"
       media_player_id: !input media_player
       jvc_sensor_id: !input jvc_power_sensor
